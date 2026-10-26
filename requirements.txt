@@ -4,3 +4,4 @@ pycryptodome
 protobuf
 PyJWT
 grpcio-tools
+httpx
