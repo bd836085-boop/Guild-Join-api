@@ -3,6 +3,7 @@ requests
 pycryptodome
 protobuf
 PyJWT
-upgrade protobuf
 grpcio-tools
-python -m grpc_tools.protoc --proto_path=. --python_out=. reqClan.proto   
+python -m grpc_tools.protoc
+proto_path=. 
+python_out=. reqClan.proto   
