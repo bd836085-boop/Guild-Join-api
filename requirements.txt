@@ -4,6 +4,3 @@ pycryptodome
 protobuf
 PyJWT
 grpcio-tools
-python -m grpc_tools.protoc
-proto_path=. 
-python_out=. reqClan.proto   
