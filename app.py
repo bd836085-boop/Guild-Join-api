@@ -20,7 +20,7 @@ from google.protobuf.message import Message
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 RELEASE_VERSION = "OB55"
-CLIENT_VERSION = "1.132.3" # वर्जन अपडेट किया गया
+CLIENT_VERSION = "1.132.3"
 MAJORLOGIN = "https://loginbp.ppmainecoonghj.com"
 
 app = Flask(__name__)
@@ -29,9 +29,9 @@ if hasattr(app, 'json'):
     app.json.sort_keys = False
 
 DEV_CREDITS = {
-    "Developer": "TitanCodex",
-    "TelegramBot": "TitanBossCodex",
-    "TelegramChannel": "https://t.me/TitanBossCodex"
+    "Developer": "Riduanul Islam",
+    "TelegramBot": "https://t.me/RiduanCodexBot",
+    "TelegramChannel": "https://t.me/RiduanCodex"
 }
 
 AES_KEY = bytes([89, 103, 38, 116, 99, 37, 68, 69, 117, 104, 54, 37, 90, 99, 94, 56])
@@ -41,15 +41,15 @@ MAIN_KEY = base64.b64decode("WWcmdGMlREV1aDYlWmNeOA==")
 MAIN_IV = base64.b64decode("Nm95WkRyMjJFM3ljaGpNJQ==")
 USERAGENT = "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)"
 
-# नेटवर्क रिट्राई और सेशन सेटअप
 _session = requests.Session()
 _retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
 _session.mount('https://', HTTPAdapter(max_retries=_retries))
 _session.verify = False
 
+# सही रीजनल एंडपॉइंट्स
 api_endpoints = {
     "IND": "https://client.ind.freefiremobile.com",
-    "ID": "https://client.id.freefiremobile.com", # इंडोनेशिया के लिए सीधा एंडपॉइंट
+    "ID": "https://client.id.freefiremobile.com",
     "AMERICAS": "https://client.us.freefiremobile.com", 
     "DEFAULT": "https://clientbp.ggpolarbear.com"
 }
@@ -155,7 +155,6 @@ def major_login_new(access_token, open_id):
         resp = _session.post(f"{MAJORLOGIN}/MajorLogin", data=payload, headers=headers, timeout=15)
         msg = extract_login_res(resp.content)
         if msg and "token" in msg:
-            # server_url को भी रिटर्न करें
             return {"token": msg["token"], "server_url": msg.get("server_url")}, None
         return None, "MajorLogin failed"
     except Exception as e:
@@ -208,11 +207,12 @@ def get_region_from_jwt(jwt_token):
     except Exception:
         return 'IND'
 
+# 🛠️ सबसे महत्वपूर्ण फिक्स: ID रीजन को सही पहचानें
 def get_region_type(region):
     region = region.upper()
     if region == "IND":
         return "IND"
-    elif region == "ID":
+    elif region == "ID":          # इंडोनेशिया के लिए अलग टाइप
         return "ID"
     elif region in ["BR", "US", "NA", "SAC"]:
         return "AMERICAS"
@@ -234,7 +234,6 @@ def make_clan_request(jwt_token, clan_id, endpoint, server_url=None):
         region = get_region_from_jwt(jwt_token)
         region_type = get_region_type(region)
         
-        # यदि लॉगिन से server_url मिला है तो उसका उपयोग करें, अन्यथा रीजन के आधार पर एंडपॉइंट चुनें
         if server_url:
             base_url = server_url
         else:
@@ -261,8 +260,8 @@ def make_clan_request(jwt_token, clan_id, endpoint, server_url=None):
         try:
             response = _session.post(url, headers=headers, data=encrypted_data, timeout=15)
         except requests.exceptions.ConnectionError:
-            # फॉलबैक: यदि server_url विफल हो तो इंडोनेशिया या IND एंडपॉइंट आज़माएं
-            fallback_url = f"{api_endpoints['ID']}/{endpoint}"
+            # फॉलबैक: अगर server_url फेल हो, तो रीजन के हिसाब से सही एंडपॉइंट चुनें
+            fallback_url = api_endpoints.get(region_type, api_endpoints["IND"]) + f"/{endpoint}"
             response = _session.post(fallback_url, headers=headers, data=encrypted_data, timeout=15)
         
         try:
@@ -288,10 +287,13 @@ def make_clan_request(jwt_token, clan_id, endpoint, server_url=None):
 
 def get_guild_name_with_token(guild_id, jwt_token, server_url=None):
     try:
+        region = get_region_from_jwt(jwt_token)
+        region_type = get_region_type(region)
+        
         if server_url:
             base_url = server_url
         else:
-            base_url = api_endpoints.get(get_region_type(get_region_from_jwt(jwt_token)), api_endpoints["DEFAULT"])
+            base_url = api_endpoints.get(region_type, api_endpoints["DEFAULT"])
         
         my_data = encode_id_clan_pb2.MyData()
         my_data.field1 = int(guild_id)
@@ -314,7 +316,7 @@ def get_guild_name_with_token(guild_id, jwt_token, server_url=None):
         try:
             response = _session.post(url, headers=headers, data=bytes.fromhex(encrypted_hex), timeout=10)
         except requests.exceptions.ConnectionError:
-            fallback_url = api_endpoints['ID'] + "/GetClanInfoByClanID"
+            fallback_url = api_endpoints.get(region_type, api_endpoints["IND"]) + "/GetClanInfoByClanID"
             response = _session.post(fallback_url, headers=headers, data=bytes.fromhex(encrypted_hex), timeout=10)
             
         if response.status_code == 200:
@@ -349,28 +351,16 @@ def join_guild_route():
         password = request.args.get("password")
         
         if not guild_id:
-            return jsonify({
-                **DEV_CREDITS,
-                "success": False,
-                "error": "guild_id is required"
-            }), 400
+            return jsonify({**DEV_CREDITS, "success": False, "error": "guild_id is required"}), 400
         
         try:
             guild_id = int(guild_id)
         except ValueError:
-            return jsonify({
-                **DEV_CREDITS,
-                "success": False,
-                "error": "guild_id must be a valid number"
-            }), 400
+            return jsonify({**DEV_CREDITS, "success": False, "error": "guild_id must be a valid number"}), 400
         
         jwt_token, server_url, error = get_jwt_token_from_credentials(uid, password)
         if error:
-            return jsonify({
-                **DEV_CREDITS,
-                "success": False,
-                "error": f"Authentication failed: {error}"
-            }), 400
+            return jsonify({**DEV_CREDITS, "success": False, "error": f"Authentication failed: {error}"}), 400
         
         region = get_region_from_jwt(jwt_token)
         guild_name = get_guild_name_with_token(guild_id, jwt_token, server_url)
@@ -402,11 +392,7 @@ def join_guild_route():
         })
         
     except Exception as e:
-        return jsonify({
-            **DEV_CREDITS,
-            "success": False,
-            "error": f"Join request failed: {str(e)}"
-        }), 500
+        return jsonify({**DEV_CREDITS, "success": False, "error": f"Join request failed: {str(e)}"}), 500
 
 if __name__ == "__main__":
     app.run(debug=False, host='0.0.0.0', port=5001)
