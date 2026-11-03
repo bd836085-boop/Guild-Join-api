@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import requests
-import httpx
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 import encode_id_clan_pb2
@@ -9,15 +10,17 @@ import reqClan_pb2
 import jwt
 import json
 import base64
+import urllib3
 from urllib.parse import urlparse, parse_qs
 from google.protobuf import json_format
 from google.protobuf import descriptor_pool, symbol_database, runtime_version
 from google.protobuf.internal import builder
 from google.protobuf.message import Message
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 RELEASE_VERSION = "OB55"
-CLIENT_VERSION = "1.132.1"
-CLIENT_VERSION_CODE = "2019121229"
+CLIENT_VERSION = "1.132.3" # वर्जन अपडेट किया गया
 MAJORLOGIN = "https://loginbp.ppmainecoonghj.com"
 
 app = Flask(__name__)
@@ -26,9 +29,9 @@ if hasattr(app, 'json'):
     app.json.sort_keys = False
 
 DEV_CREDITS = {
-    "Developer": "Riduanul Islam",
-    "TelegramBot": "https://t.me/RiduanCodexBot",
-    "TelegramChannel": "https://t.me/RiduanCodex"
+    "Developer": "TitanCodex",
+    "TelegramBot": "TitanBossCodex",
+    "TelegramChannel": "https://t.me/TitanBossCodex"
 }
 
 AES_KEY = bytes([89, 103, 38, 116, 99, 37, 68, 69, 117, 104, 54, 37, 90, 99, 94, 56])
@@ -38,12 +41,15 @@ MAIN_KEY = base64.b64decode("WWcmdGMlREV1aDYlWmNeOA==")
 MAIN_IV = base64.b64decode("Nm95WkRyMjJFM3ljaGpNJQ==")
 USERAGENT = "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)"
 
-HTTP_LIMITS = httpx.Limits(max_keepalive_connections=20, max_connections=50)
-HTTP_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
-_http_client = httpx.Client(limits=HTTP_LIMITS, timeout=HTTP_TIMEOUT, verify=False)
+# नेटवर्क रिट्राई और सेशन सेटअप
+_session = requests.Session()
+_retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+_session.mount('https://', HTTPAdapter(max_retries=_retries))
+_session.verify = False
 
 api_endpoints = {
     "IND": "https://client.ind.freefiremobile.com",
+    "ID": "https://client.id.freefiremobile.com", # इंडोनेशिया के लिए सीधा एंडपॉइंट
     "AMERICAS": "https://client.us.freefiremobile.com", 
     "DEFAULT": "https://clientbp.ggpolarbear.com"
 }
@@ -146,10 +152,11 @@ def major_login_new(access_token, open_id):
             "PlAy_VeR": CLIENT_VERSION,
             "Ob_VeR": RELEASE_VERSION,
         }
-        resp = _http_client.post(f"{MAJORLOGIN}/MajorLogin", data=payload, headers=headers)
+        resp = _session.post(f"{MAJORLOGIN}/MajorLogin", data=payload, headers=headers, timeout=15)
         msg = extract_login_res(resp.content)
         if msg and "token" in msg:
-            return {"token": msg["token"]}, None
+            # server_url को भी रिटर्न करें
+            return {"token": msg["token"], "server_url": msg.get("server_url")}, None
         return None, "MajorLogin failed"
     except Exception as e:
         return None, f"MajorLogin error: {str(e)}"
@@ -163,25 +170,28 @@ def get_access_token(account: str):
         "Accept-Encoding": "gzip",
         "Content-Type": "application/x-www-form-urlencoded",
     }
-    resp = _http_client.post(url, data=payload, headers=headers)
-    data = resp.json()
-    return data.get("access_token", "0"), data.get("open_id", "0")
+    try:
+        resp = _session.post(url, data=payload, headers=headers, timeout=15)
+        data = resp.json()
+        return data.get("access_token", "0"), data.get("open_id", "0")
+    except Exception:
+        return "0", "0"
 
 def generate_jwt_from_credentials(uid: str, password: str):
     token_val, open_id = get_access_token(f"uid={uid}&password={password}")
     if token_val == "0" or open_id == "0":
-        return None
+        return None, None
     login_result, error = major_login_new(token_val, open_id)
     if login_result:
-        return login_result['token']
-    return None
+        return login_result['token'], login_result.get('server_url')
+    return None, None
 
 def get_jwt_token_from_credentials(uid, password):
     if uid and password:
-        jwt_token = generate_jwt_from_credentials(uid, password)
+        jwt_token, server_url = generate_jwt_from_credentials(uid, password)
         if jwt_token:
-            return jwt_token, None
-    return None, "Invalid or missing uid and password"
+            return jwt_token, server_url, None
+    return None, None, "Invalid or missing uid and password"
 
 def encrypt_api(plain_text):
     plain_text = bytes.fromhex(plain_text)
@@ -202,6 +212,8 @@ def get_region_type(region):
     region = region.upper()
     if region == "IND":
         return "IND"
+    elif region == "ID":
+        return "ID"
     elif region in ["BR", "US", "NA", "SAC"]:
         return "AMERICAS"
     else:
@@ -217,11 +229,16 @@ def create_clan_payload(clan_id):
     except Exception as e:
         return None, f"Payload creation failed: {str(e)}"
 
-def make_clan_request(jwt_token, clan_id, endpoint):
+def make_clan_request(jwt_token, clan_id, endpoint, server_url=None):
     try:
         region = get_region_from_jwt(jwt_token)
         region_type = get_region_type(region)
-        base_url = api_endpoints.get(region_type, api_endpoints["DEFAULT"])
+        
+        # यदि लॉगिन से server_url मिला है तो उसका उपयोग करें, अन्यथा रीजन के आधार पर एंडपॉइंट चुनें
+        if server_url:
+            base_url = server_url
+        else:
+            base_url = api_endpoints.get(region_type, api_endpoints["DEFAULT"])
         
         encrypted_data, payload_error = create_clan_payload(clan_id)
         if payload_error:
@@ -237,12 +254,16 @@ def make_clan_request(jwt_token, clan_id, endpoint):
             "ReleaseVersion": RELEASE_VERSION,
             "Content-Type": "application/octet-stream",
             "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 10; ASUS_Z01QD Build/RP1A.200720.012)",
-            "Host": base_url.replace("https://", ""),
             "Connection": "Keep-Alive",
             "Accept-Encoding": "gzip"
         }
 
-        response = requests.post(url, headers=headers, data=encrypted_data, timeout=30)
+        try:
+            response = _session.post(url, headers=headers, data=encrypted_data, timeout=15)
+        except requests.exceptions.ConnectionError:
+            # फॉलबैक: यदि server_url विफल हो तो इंडोनेशिया या IND एंडपॉइंट आज़माएं
+            fallback_url = f"{api_endpoints['ID']}/{endpoint}"
+            response = _session.post(fallback_url, headers=headers, data=encrypted_data, timeout=15)
         
         try:
             resp_info = data_pb2.response()
@@ -265,9 +286,13 @@ def make_clan_request(jwt_token, clan_id, endpoint):
     except Exception as e:
         return None, f"Network error: {str(e)}", None
 
-def get_guild_name_with_token(guild_id, jwt_token):
+def get_guild_name_with_token(guild_id, jwt_token, server_url=None):
     try:
-        base_url = api_endpoints.get(get_region_type(get_region_from_jwt(jwt_token)), api_endpoints["DEFAULT"])
+        if server_url:
+            base_url = server_url
+        else:
+            base_url = api_endpoints.get(get_region_type(get_region_from_jwt(jwt_token)), api_endpoints["DEFAULT"])
+        
         my_data = encode_id_clan_pb2.MyData()
         my_data.field1 = int(guild_id)
         my_data.field2 = 1
@@ -286,7 +311,12 @@ def get_guild_name_with_token(guild_id, jwt_token):
             'Content-Type': 'application/x-www-form-urlencoded',
         }
 
-        response = requests.post(url, headers=headers, data=bytes.fromhex(encrypted_hex), timeout=8)
+        try:
+            response = _session.post(url, headers=headers, data=bytes.fromhex(encrypted_hex), timeout=10)
+        except requests.exceptions.ConnectionError:
+            fallback_url = api_endpoints['ID'] + "/GetClanInfoByClanID"
+            response = _session.post(fallback_url, headers=headers, data=bytes.fromhex(encrypted_hex), timeout=10)
+            
         if response.status_code == 200:
             msg = data_pb2.response()
             msg.ParseFromString(response.content)
@@ -334,7 +364,7 @@ def join_guild_route():
                 "error": "guild_id must be a valid number"
             }), 400
         
-        jwt_token, error = get_jwt_token_from_credentials(uid, password)
+        jwt_token, server_url, error = get_jwt_token_from_credentials(uid, password)
         if error:
             return jsonify({
                 **DEV_CREDITS,
@@ -343,9 +373,9 @@ def join_guild_route():
             }), 400
         
         region = get_region_from_jwt(jwt_token)
-        guild_name = get_guild_name_with_token(guild_id, jwt_token)
+        guild_name = get_guild_name_with_token(guild_id, jwt_token, server_url)
         
-        response, error, raw_response = make_clan_request(jwt_token, guild_id, "RequestJoinClan")
+        response, error, raw_response = make_clan_request(jwt_token, guild_id, "RequestJoinClan", server_url)
         
         if error:
             return jsonify({
