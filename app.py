@@ -29,9 +29,9 @@ if hasattr(app, 'json'):
     app.json.sort_keys = False
 
 DEV_CREDITS = {
-    "Developer": "Riduanul Islam",
-    "TelegramBot": "https://t.me/RiduanCodexBot",
-    "TelegramChannel": "https://t.me/RiduanCodex"
+    "Developer": "Titan Codex",
+    "TelegramBot": "https://t.me/TitanCodexBot",
+    "TelegramChannel": "https://t.me/TitanBossCodex"
 }
 
 AES_KEY = bytes([89, 103, 38, 116, 99, 37, 68, 69, 117, 104, 54, 37, 90, 99, 94, 56])
@@ -46,13 +46,12 @@ _retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 5
 _session.mount('https://', HTTPAdapter(max_retries=_retries))
 _session.verify = False
 
-# सही रीजनल एंडपॉइंट्स
+# 🛠️ फिक्स: सिर्फ ग्लोबल डोमेन रखें, रीजनल डोमेन हटा दें
 api_endpoints = {
-    "IND": "https://client.ind.freefiremobile.com",
-    "ID": "https://client.id.freefiremobile.com",
-    "AMERICAS": "https://client.us.freefiremobile.com", 
     "DEFAULT": "https://clientbp.ggpolarbear.com"
 }
+# IP फॉलबैक (अगर डोमेन रिज़ॉल्व न हो)
+FALLBACK_IP = "https://202.81.99.10"
 
 runtime_version.ValidateProtobufRuntimeVersion(runtime_version.Domain.PUBLIC, 6, 30, 0, "", "FreeFire.proto")
 _sym_db = symbol_database.Default()
@@ -207,18 +206,6 @@ def get_region_from_jwt(jwt_token):
     except Exception:
         return 'IND'
 
-# 🛠️ सबसे महत्वपूर्ण फिक्स: ID रीजन को सही पहचानें
-def get_region_type(region):
-    region = region.upper()
-    if region == "IND":
-        return "IND"
-    elif region == "ID":          # इंडोनेशिया के लिए अलग टाइप
-        return "ID"
-    elif region in ["BR", "US", "NA", "SAC"]:
-        return "AMERICAS"
-    else:
-        return "DEFAULT"
-
 def create_clan_payload(clan_id):
     try:
         message = reqClan_pb2.MyMessage()
@@ -229,15 +216,24 @@ def create_clan_payload(clan_id):
     except Exception as e:
         return None, f"Payload creation failed: {str(e)}"
 
+def _execute_post_with_fallback(url, headers, data, endpoint, timeout=15):
+    """डोमेन रिज़ॉल्यूशन फेल होने पर IP फॉलबैक के साथ रिक्वेस्ट भेजने का हेल्पर"""
+    try:
+        return _session.post(url, headers=headers, data=data, timeout=timeout)
+    except requests.exceptions.ConnectionError:
+        # फॉलबैक 1: अगर serverUrl फेल हो, तो डिफ़ॉल्ट ग्लोबल डोमेन आज़माएं
+        fallback_url = f"{api_endpoints['DEFAULT']}/{endpoint}"
+        try:
+            return _session.post(fallback_url, headers=headers, data=data, timeout=timeout)
+        except requests.exceptions.ConnectionError:
+            # फॉलबैक 2: अगर डोमेन अभी भी रिज़ॉल्व न हो, तो सीधे IP आज़माएं
+            ip_url = f"{FALLBACK_IP}/{endpoint}"
+            return _session.post(ip_url, headers=headers, data=data, timeout=timeout)
+
 def make_clan_request(jwt_token, clan_id, endpoint, server_url=None):
     try:
-        region = get_region_from_jwt(jwt_token)
-        region_type = get_region_type(region)
-        
-        if server_url:
-            base_url = server_url
-        else:
-            base_url = api_endpoints.get(region_type, api_endpoints["DEFAULT"])
+        # 🛠️ फिक्स: सिर्फ server_url या डिफ़ॉल्ट ग्लोबल डोमेन का उपयोग करें
+        base_url = server_url if server_url else api_endpoints["DEFAULT"]
         
         encrypted_data, payload_error = create_clan_payload(clan_id)
         if payload_error:
@@ -257,12 +253,7 @@ def make_clan_request(jwt_token, clan_id, endpoint, server_url=None):
             "Accept-Encoding": "gzip"
         }
 
-        try:
-            response = _session.post(url, headers=headers, data=encrypted_data, timeout=15)
-        except requests.exceptions.ConnectionError:
-            # फॉलबैक: अगर server_url फेल हो, तो रीजन के हिसाब से सही एंडपॉइंट चुनें
-            fallback_url = api_endpoints.get(region_type, api_endpoints["IND"]) + f"/{endpoint}"
-            response = _session.post(fallback_url, headers=headers, data=encrypted_data, timeout=15)
+        response = _execute_post_with_fallback(url, headers, encrypted_data, endpoint, timeout=15)
         
         try:
             resp_info = data_pb2.response()
@@ -287,13 +278,8 @@ def make_clan_request(jwt_token, clan_id, endpoint, server_url=None):
 
 def get_guild_name_with_token(guild_id, jwt_token, server_url=None):
     try:
-        region = get_region_from_jwt(jwt_token)
-        region_type = get_region_type(region)
-        
-        if server_url:
-            base_url = server_url
-        else:
-            base_url = api_endpoints.get(region_type, api_endpoints["DEFAULT"])
+        # 🛠️ फिक्स: सिर्फ server_url या डिफ़ॉल्ट ग्लोबल डोमेन का उपयोग करें
+        base_url = server_url if server_url else api_endpoints["DEFAULT"]
         
         my_data = encode_id_clan_pb2.MyData()
         my_data.field1 = int(guild_id)
@@ -313,11 +299,7 @@ def get_guild_name_with_token(guild_id, jwt_token, server_url=None):
             'Content-Type': 'application/x-www-form-urlencoded',
         }
 
-        try:
-            response = _session.post(url, headers=headers, data=bytes.fromhex(encrypted_hex), timeout=10)
-        except requests.exceptions.ConnectionError:
-            fallback_url = api_endpoints.get(region_type, api_endpoints["IND"]) + "/GetClanInfoByClanID"
-            response = _session.post(fallback_url, headers=headers, data=bytes.fromhex(encrypted_hex), timeout=10)
+        response = _execute_post_with_fallback(url, headers, bytes.fromhex(encrypted_hex), "GetClanInfoByClanID", timeout=10)
             
         if response.status_code == 200:
             msg = data_pb2.response()
